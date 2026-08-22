@@ -1,157 +1,40 @@
-import os
-import random
 import sqlite3
-from flask import (
-    Flask,
-    jsonify,
-    redirect,
-    render_template,
-    request,
-    session,
-    url_for,
-)
+from flask import Flask, jsonify, render_template, request
 
 app = Flask(__name__)
-app.secret_key = "clave_secreta_sistema_qr"
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "evento.db")
+DB_PATH = "codigos_qr.db"
 
 
-def inicializar_db():
+def preparar_base_datos():
+    """Asegura que exista la columna 'estado' en la tabla 'qrs'"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS boletos (
-            id TEXT PRIMARY KEY,
-            estado TEXT NOT NULL
-        )
-    """
-    )
-    conn.commit()
-    conn.close()
-
-
-inicializar_db()
-
-
-# --- VISTA PÚBLICA (PARTIDO Y VENTA) ---
-@app.route("/")
-def pagina_partido():
-    return render_template("index.html")
-
-
-@app.route("/api/comprar_boleto", methods=["POST"])
-def comprar_boleto():
     try:
-        datos = request.get_json(silent=True) or {}
-        nombre = datos.get("nombre", "").strip()
-        cedula = datos.get("cedula", "").strip()
-
-        if not nombre or not cedula:
-            return (
-                jsonify(
-                    {
-                        "status": "error",
-                        "mensaje": "Por favor ingresa nombre y cédula.",
-                    }
-                ),
-                400,
-            )
-
-        codigo_nuevo = f"CUE-{random.randint(100000, 999999)}"
-
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO boletos (id, estado) VALUES (?, 'DISPONIBLE')",
-            (codigo_nuevo,),
+            "ALTER TABLE qrs ADD COLUMN estado TEXT DEFAULT 'DISPONIBLE'"
         )
         conn.commit()
-        conn.close()
-
-        return jsonify({"status": "exito", "codigo": codigo_nuevo})
-
-    except Exception as e:
-        return (
-            jsonify(
-                {"status": "error", "mensaje": f"Error en servidor: {str(e)}"}
-            ),
-            500,
-        )
-
-
-# --- SISTEMA DE ADMINISTRACIÓN Y ESCÁNER ---
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    if request.method == "POST":
-        # Usamos .strip() y .lower() para evitar fallos por espacios o mayúsculas
-        usuario = request.form.get("usuario", "").strip().lower()
-        password = request.form.get("password", "").strip()
-
-        # Validación flexible de credenciales
-        if usuario == "admin" and password == "1234":
-            session["usuario"] = usuario
-            return redirect(url_for("escanear"))
-        
-        # Si falla, devuelve el mensaje de error explícito
-        return render_template("login.html", error="Usuario o contraseña incorrectos")
-
-    return render_template("login.html")
-
-
-@app.route("/logout")
-def logout():
-    session.pop("usuario", None)
-    return redirect(url_for("login"))
-
-
-@app.route("/escanear")
-def escanear():
-    if "usuario" not in session:
-        return redirect(url_for("login"))
-    return render_template("escanear.html")
-
-
-@app.route("/reporte")
-def reporte():
-    if "usuario" not in session:
-        return redirect(url_for("login"))
-
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, estado FROM boletos")
-    boletos = cursor.fetchall()
+    except sqlite3.OperationalError:
+        pass  # La columna ya existe
     conn.close()
 
-    total = len(boletos)
-    usados = sum(1 for b in boletos if b[1] == "USADO")
-    disponibles = total - usados
 
-    return render_template(
-        "reporte.html",
-        boletos=boletos,
-        total=total,
-        usados=usados,
-        disponibles=disponibles,
-    )
+@app.route("/")
+def index():
+    return render_template("escanear.html")
 
 
 @app.route("/api/validar", methods=["POST"])
 def validar_qr():
-    if "usuario" not in session:
-        return jsonify(
-            {"status": "error", "mensaje": "Sesión expirada. Inicie sesión."}
-        )
-
-    datos = request.get_json(silent=True) or {}
-    codigo_qr = datos.get("codigo", "").strip()
+    datos = request.get_json()
+    contenido_qr = datos.get("codigo", "").strip()
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+
+    # Buscar el QR en la base de datos
     cursor.execute(
-        "SELECT id, estado FROM boletos WHERE id = ?", (codigo_qr,)
+        "SELECT id, estado FROM qrs WHERE contenido = ?", (contenido_qr,)
     )
     resultado = cursor.fetchone()
 
@@ -159,85 +42,35 @@ def validar_qr():
         conn.close()
         return jsonify(
             {
-                "status": "invalid",
-                "titulo": "⛔ CÓDIGO NO ENCONTRADO",
-                "mensaje": f"El código '{codigo_qr}' no existe.",
+                "status": "error",
+                "mensaje": "❌ CÓDIGO INVÁLIDO: No existe en el sistema.",
             }
         )
 
-    boleto_id, estado = resultado
+    qr_id, estado = resultado
 
     if estado == "USADO":
         conn.close()
         return jsonify(
             {
                 "status": "warning",
-                "titulo": "🚫 INGRESO DENEGADO",
-                "mensaje": f"¡ALERTA! El boleto #{boleto_id} YA FUE UTILIZADO.",
+                "mensaje": f"⚠️ ALERTA: El boleto ({contenido_qr}) YA FUE UTILIZADO.",
             }
         )
 
-    cursor.execute(
-        "UPDATE boletos SET estado = 'USADO' WHERE id = ?", (boleto_id,)
-    )
-    conn.commit()
-    conn.close()
-
-    return jsonify(
-        {
-            "status": "valid",
-            "titulo": "🎉 ¡INGRESO PERMITIDO!",
-            "mensaje": f"Boleto #{boleto_id} verificado con éxito.",
-        }
-    )
-
-# --- REACTIVAR UN BOLETO ESPECÍFICO ---
-@app.route("/api/reactivar_boleto", methods=["POST"])
-def reactivar_boleto():
-    if "usuario" not in session:
-        return jsonify(
-            {"status": "error", "mensaje": "No autorizado."}
-        ), 401
-
-    datos = request.get_json(silent=True) or {}
-    codigo_qr = datos.get("codigo", "").strip()
-
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute(
-        "UPDATE boletos SET estado = 'DISPONIBLE' WHERE id = ?", (codigo_qr,)
-    )
+    # Marcar como USADO
+    cursor.execute("UPDATE qrs SET estado = 'USADO' WHERE id = ?", (qr_id,))
     conn.commit()
     conn.close()
 
     return jsonify(
         {
             "status": "exito",
-            "mensaje": f"Boleto {codigo_qr} reactivado correctamente.",
+            "mensaje": f"✅ ACCESO PERMITIDO: Boleto válido ({contenido_qr}).",
         }
     )
 
-
-# --- RESETEAR TODOS LOS BOLETOS A DISPONIBLE ---
-@app.route("/api/resetear_todos", methods=["POST"])
-def resetear_todos():
-    if "usuario" not in session:
-        return jsonify(
-            {"status": "error", "mensaje": "No autorizado."}
-        ), 401
-
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE boletos SET estado = 'DISPONIBLE'")
-    conn.commit()
-    conn.close()
-
-    return jsonify(
-        {
-            "status": "exito",
-            "mensaje": "Todos los boletos han sido marcados como DISPONIBLES.",
-        }
-    )
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    preparar_base_datos()
+    app.run(host="0.0.0.0", port=5000, debug=True)

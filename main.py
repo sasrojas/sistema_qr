@@ -13,7 +13,7 @@ app = FastAPI(title="API Verificación QR", version="1.0.0")
 load_dotenv()
 
 # 🗄️ CONEXIÓN A LA BASE DE DATOS
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///../codigos_qr.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./codigos_qr.db")
 
 engine = create_engine(
     DATABASE_URL,
